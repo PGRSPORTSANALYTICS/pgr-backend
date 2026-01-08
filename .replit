@@ -1,6 +1,7 @@
 modules = ["python-3.11"]
 [agent]
 expertMode = true
+integrations = ["stripe:2.0.0"]
 
 [nix]
 channel = "stable-25_05"
@@ -22,13 +23,13 @@ args = "Backend API"
 name = "Backend API"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python app.py"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -m app.main"
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000
