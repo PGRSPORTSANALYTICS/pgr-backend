@@ -159,4 +159,12 @@ async def me(current_user: User = Depends(get_current_user)):
     access_level = (
         current_user.access_level.value
         if hasattr(current_user.access_level, "value")
-        else str(current
+        else str(current_user.access_level)
+    )
+
+    return UserResponse(
+        id=str(current_user.id),
+        email=current_user.email,
+        access_level=access_level,
+        created_at=current_user.created_at,
+    )
