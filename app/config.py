@@ -1,24 +1,24 @@
-# app/config.py
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Grund
+    # App
     app_name: str = "PGR Backend"
     app_version: str = "1.0.0"
     debug: bool = False
 
-    # DB (måste finnas som env)
+    # DB
     database_url: str
 
-    # Auth (måste finnas som env)
+    # Auth (ENDA vi ska använda för JWT)
     jwt_secret: str
 
-    # Server (Railway kör PORT)
+    # Server
     host: str = "0.0.0.0"
     port: int = 5000
 
+    # Pydantic settings
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     )
 
 
-@lru_cache
+@lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # Fail fast om JWT_SECRET saknas
+    if not s.jwt_secret or len(s.jwt_secret) < 20:
+        raise RuntimeError("JWT_SECRET missing/too short. Set JWT_SECRET in Railway variables.")
+    return s
