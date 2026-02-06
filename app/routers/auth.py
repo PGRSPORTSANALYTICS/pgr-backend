@@ -53,11 +53,18 @@ def create_access_token(user_id: str, email: str) -> str:
 
 def decode_token(token: str) -> Optional[Dict]:
     settings = get_settings()
-    try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-    except Exception:
-        return None
 
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=["HS256"],
+        )
+        return payload
+
+    except Exception as e:
+        print("JWT decode error:", e)
+        return None
 
 def _extract_token_from_anywhere(
     credentials: Optional[HTTPAuthorizationCredentials],
