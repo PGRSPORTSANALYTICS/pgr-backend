@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # DB
     database_url: str
 
-    # Auth (DETTA är nyckeln vi använder överallt)
+    # Auth (detta är nyckeln vi använder överallt)
     jwt_secret: str
 
     # Server
