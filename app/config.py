@@ -1,34 +1,33 @@
 import os
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # App
     app_name: str = "PGR Backend"
     app_version: str = "1.0.0"
-    environment: str = os.getenv("ENVIRONMENT", "production")
-    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
 
-    # DB (stöd både DATABASE_URL och SQLALCHEMY_DATABASE_URL)
-    database_url: str = (
-        os.getenv("SQLALCHEMY_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or ""
-    )
+    # DB
+    database_url: str = os.getenv("DATABASE_URL", "")
+    sqlalchemy_database_url: str = os.getenv("SQLALCHEMY_DATABASE_URL", "")
 
-    # Secrets
-    session_secret: str = os.getenv("SESSION_SECRET", "dev-session-secret-change-me")
+    # AUTH (DENNA är det viktiga)
     jwt_secret: str = os.getenv("JWT_SECRET", "")
 
-    # Server
-    host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8000"))
+    # Stripe (valfritt här, men bra att ha)
+    stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-    # Pydantic settings config
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    host: str = "0.0.0.0"
+    port: int = int(os.getenv("PORT", "5000"))
+
+    class Config:
+        env_file = ".env"
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    if not s.jwt_secret:
+        # Hellre fail-fast än att skapa tokens som alltid blir "Invalid token"
+        raise RuntimeError("JWT_SECRET is missing. Set it in Railway -> pgr-backend -> Variables.")
+    return s
