@@ -6,24 +6,24 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = "PGR Backend"
     app_version: str = "1.0.0"
+    environment: str = os.getenv("ENVIRONMENT", "production")
+    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
 
-    # tidigare saker som ditt projekt redan använder
-    environment: str = os.getenv("REPLIT_DEPLOYMENT", "production")
-    debug: bool = os.getenv("REPLIT_DEPLOYMENT", "0") == "1"
-
+    # DB
     database_url: str = os.getenv("DATABASE_URL", "")
     sqlalchemy_database_url: str = os.getenv("SQLALCHEMY_DATABASE_URL", "")
 
-    # BEHÅLL DENNA (annars kraschar andra delar av projektet)
+    # Secrets
     session_secret: str = os.getenv("SESSION_SECRET", "")
 
-    # NY: JWT_SECRET (men vi låter den falla tillbaka på SESSION_SECRET)
-    jwt_secret: str = os.getenv("JWT_SECRET", "")  # kan vara tom
+    # ✅ JWT_SECRET är den vi använder för JWT
+    # fallback till SESSION_SECRET så allt inte dör om du råkat ha bara den
+    jwt_secret: str = os.getenv("JWT_SECRET") or os.getenv("SESSION_SECRET") or "dev-insecure-secret"
 
-    host: str = "0.0.0.0"
-    port: int = int(os.getenv("PORT", "5000"))
+    stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-    replit_domains: str = os.getenv("REPLIT_DOMAINS", "")
+    host: str = os.getenv("HOST", "0.0.0.0")
+    port: int = int(os.getenv("PORT", "8000"))
 
     class Config:
         env_file = ".env"
@@ -31,8 +31,4 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    s = Settings()
-    # Om JWT_SECRET saknas, använd SESSION_SECRET så auth ändå funkar
-    if not s.jwt_secret:
-        s.jwt_secret = s.session_secret
-    return s
+    return Settings()
