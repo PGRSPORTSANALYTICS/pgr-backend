@@ -101,34 +101,47 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     return LoginResponse(token=token, user_id=user.id, email=user.email)
 
 
+from jose import jwt
 from jose.exceptions import JWTError
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
-
     try:
+        raw = credentials.credentials  # ska vara bara JWT
+        token = raw.strip()
+
+        # Om någon råkat skicka "Bearer xxx" här, städa upp
+        if token.lower().startswith("bearer "):
+            token = token.split(" ", 1)[1].strip()
+
         payload = jwt.decode(
             token,
             get_settings().jwt_secret,
             algorithms=["HS256"],
         )
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return user
+
+    except HTTPException:
+        raise
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
-    user_id = payload.get("sub")
-    if not user_id:
+    except Exception:
+        # sista skyddsnät: aldrig 500 på auth
         raise HTTPException(status_code=401, detail="Invalid token")
-
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    return user
 
 
 
