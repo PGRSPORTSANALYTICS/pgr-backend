@@ -1,205 +1,64 @@
-import os
-import asyncio
-from functools import partial
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel
-from typing import Optional
-from app.database import get_db, async_session_maker
-from app.models.user import User, AccessLevel
-from app.models.subscription import Subscription
-from app.services.stripe_service import stripe_service
-from app.services.audit import audit_service
-from app.routers.auth import get_current_user
-import uuid
+from pydantic import BaseModel, AnyHttpUrl
+import stripe
+
+from app.config import get_settings, Settings
 
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
-class CreateCheckoutRequest(BaseModel):
+
+class CreateCheckoutSessionIn(BaseModel):
     price_id: str
-    success_url: Optional[str] = None
-    cancel_url: Optional[str] = None
+    success_url: AnyHttpUrl
+    cancel_url: AnyHttpUrl
 
-class CheckoutResponse(BaseModel):
-    checkout_url: str
 
-@router.post("/create-checkout-session", response_model=CheckoutResponse)
+@router.post("/create-checkout-session")
 async def create_checkout_session(
-    request: CreateCheckoutRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    payload: CreateCheckoutSessionIn,
+    settings: Settings = Depends(get_settings),
 ):
-    replit_domains = os.getenv("REPLIT_DOMAINS", "localhost:8000")
-    base_url = f"https://{replit_domains.split(',')[0]}"
-    
-    success_url = request.success_url or f"{base_url}/checkout/success"
-    cancel_url = request.cancel_url or f"{base_url}/checkout/cancel"
-    
-    customer_id = current_user.stripe_customer_id
-    
-    if not customer_id:
-        loop = asyncio.get_event_loop()
-        customer = await loop.run_in_executor(
-            None, 
-            lambda: asyncio.run(stripe_service.create_customer(current_user.email, current_user.id))
+    # Stripe kräver secret key (sk_...)
+    if not settings.stripe_secret_key or not settings.stripe_secret_key.startswith("sk_"):
+        raise HTTPException(status_code=500, detail="Stripe secret key missing (STRIPE_SECRET_KEY)")
+
+    stripe.api_key = settings.stripe_secret_key
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": payload.price_id, "quantity": 1}],
+            success_url=str(payload.success_url) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=str(payload.cancel_url),
+            allow_promotion_codes=True,
         )
-        customer_id = customer.id
-        current_user.stripe_customer_id = customer_id
-        await db.commit()
-    
-    loop = asyncio.get_event_loop()
-    session = await stripe_service.create_checkout_session(
-        customer_id=customer_id,
-        price_id=request.price_id,
-        success_url=success_url,
-        cancel_url=cancel_url
-    )
-    
-    await audit_service.log(
-        db=db,
-        event_type="checkout_session_created",
-        source="stripe",
-        status="success",
-        user_id=current_user.id
-    )
-    
-    return CheckoutResponse(checkout_url=session.url)
+        return {"checkout_url": session.url, "id": session.id}
+
+    except stripe.error.StripeError as e:
+        # Stripe-fel (price id fel, fel konto, test/live mismatch etc)
+        raise HTTPException(status_code=400, detail=f"StripeError: {getattr(e, 'user_message', str(e))}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ServerError: {str(e)}")
+
 
 @router.post("/webhook")
-async def stripe_webhook(request: Request):
+async def stripe_webhook(request: Request, settings: Settings = Depends(get_settings)):
+    if not settings.stripe_webhook_secret or not settings.stripe_webhook_secret.startswith("whsec_"):
+        raise HTTPException(status_code=500, detail="Stripe webhook secret missing (STRIPE_WEBHOOK_SECRET)")
+
     payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-    
-    if not sig_header:
-        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
-    
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-    if not webhook_secret:
-        await audit_service.log_standalone(
-            event_type="webhook_error",
-            source="stripe",
-            status="error",
-            details="STRIPE_WEBHOOK_SECRET not configured"
-        )
-        raise HTTPException(status_code=500, detail="Webhook secret not configured")
-    
+    sig = request.headers.get("stripe-signature")
+    if not sig:
+        raise HTTPException(status_code=400, detail="Missing Stripe-Signature header")
+
     try:
-        event = await stripe_service.construct_webhook_event(payload, sig_header, webhook_secret)
-    except Exception as e:
-        await audit_service.log_standalone(
-            event_type="webhook_signature_invalid",
-            source="stripe",
-            status="error",
-            details=str(e)
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig,
+            secret=settings.stripe_webhook_secret,
         )
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    
-    event_type = event.get("type")
-    data = event.get("data", {}).get("object", {})
-    
-    async with async_session_maker() as db:
-        try:
-            if event_type == "checkout.session.completed":
-                customer_id = data.get("customer")
-                subscription_id = data.get("subscription")
-                
-                result = await db.execute(select(User).where(User.stripe_customer_id == customer_id))
-                user = result.scalar_one_or_none()
-                
-                if user:
-                    sub_result = await db.execute(
-                        select(Subscription).where(Subscription.stripe_subscription_id == subscription_id)
-                    )
-                    subscription = sub_result.scalar_one_or_none()
-                    
-                    if not subscription:
-                        subscription = Subscription(
-                            id=str(uuid.uuid4()),
-                            user_id=user.id,
-                            stripe_subscription_id=subscription_id,
-                            stripe_customer_id=customer_id,
-                            status="active"
-                        )
-                        db.add(subscription)
-                    else:
-                        subscription.status = "active"
-                    
-                    user.access_level = AccessLevel.PREMIUM
-                    await db.commit()
-                    
-                    await audit_service.log(
-                        db=db,
-                        event_type="subscription_activated",
-                        source="stripe",
-                        status="success",
-                        user_id=user.id
-                    )
-            
-            elif event_type == "customer.subscription.updated":
-                subscription_id = data.get("id")
-                status = data.get("status")
-                
-                result = await db.execute(
-                    select(Subscription).where(Subscription.stripe_subscription_id == subscription_id)
-                )
-                subscription = result.scalar_one_or_none()
-                
-                if subscription:
-                    subscription.status = status
-                    subscription.plan = data.get("items", {}).get("data", [{}])[0].get("price", {}).get("id")
-                    
-                    if status in ["canceled", "unpaid", "past_due"]:
-                        user_result = await db.execute(select(User).where(User.id == subscription.user_id))
-                        user = user_result.scalar_one_or_none()
-                        if user:
-                            user.access_level = AccessLevel.FREE
-                    
-                    await db.commit()
-                    
-                    await audit_service.log(
-                        db=db,
-                        event_type="subscription_updated",
-                        source="stripe",
-                        status="success",
-                        user_id=subscription.user_id,
-                        details=f"Status: {status}"
-                    )
-            
-            elif event_type == "customer.subscription.deleted":
-                subscription_id = data.get("id")
-                
-                result = await db.execute(
-                    select(Subscription).where(Subscription.stripe_subscription_id == subscription_id)
-                )
-                subscription = result.scalar_one_or_none()
-                
-                if subscription:
-                    subscription.status = "canceled"
-                    
-                    user_result = await db.execute(select(User).where(User.id == subscription.user_id))
-                    user = user_result.scalar_one_or_none()
-                    if user:
-                        user.access_level = AccessLevel.FREE
-                    
-                    await db.commit()
-                    
-                    await audit_service.log(
-                        db=db,
-                        event_type="subscription_canceled",
-                        source="stripe",
-                        status="success",
-                        user_id=subscription.user_id
-                    )
-        
-        except Exception as e:
-            await db.rollback()
-            await audit_service.log_standalone(
-                event_type="webhook_processing_error",
-                source="stripe",
-                status="error",
-                details=str(e)
-            )
-            raise HTTPException(status_code=500, detail="Webhook processing error")
-    
-    return {"received": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook signature verify failed: {str(e)}")
+
+    # Lägg logik här senare (uppgradera user access etc)
+    return {"received": True, "type": event["type"]}
