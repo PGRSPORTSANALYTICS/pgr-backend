@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # App
+    app_name: str = "PGR Backend"
+    app_version: str = "1.0.0"
     debug: bool = False
 
     # DB
@@ -13,8 +15,8 @@ class Settings(BaseSettings):
     jwt_secret: str
 
     # Stripe
-    stripe_secret_key: str
-    stripe_webhook_secret: str
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
