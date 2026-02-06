@@ -1,23 +1,22 @@
+# app/routers/auth.py
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
 from jose import jwt
 from jose.exceptions import JWTError
-from datetime import datetime, timedelta
-from typing import Optional, Dict
-import uuid
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User, AccessLevel
-from app.config import get_settings
 from app.services.audit import audit_service
 
-
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-# Auto_error=False så vi kan ge egen 401 och även stödja raw header om swagger strular
 security = HTTPBearer(auto_error=False)
 
 
@@ -40,80 +39,81 @@ class UserResponse(BaseModel):
 
 def create_access_token(user_id: str, email: str) -> str:
     settings = get_settings()
-    expire = datetime.utcnow() + timedelta(days=7)
 
-    to_encode = {
-        "sub": user_id,
+    expire = datetime.now(timezone.utc) + timedelta(days=7)
+    payload = {
+        "sub": str(user_id),
         "email": email,
-        "exp": expire,
+        # jose gillar säkrast unix timestamp (int)
+        "exp": int(expire.timestamp()),
     }
 
-    return jwt.encode(to_encode, settings.jwt_secret, algorithm="HS256")
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
 def decode_token(token: str) -> Optional[Dict]:
     settings = get_settings()
-
     try:
-        payload = jwt.decode(
-            token,
-            settings.jwt_secret,
-            algorithms=["HS256"],
-        )
-        return payload
-
+        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except Exception as e:
-        print("JWT decode error:", e)
+        # Loggar i Railway logs så vi kan se exakt fel
+        print("JWT decode error:", repr(e))
         return None
 
-def _extract_token_from_anywhere(
-    credentials: Optional[HTTPAuthorizationCredentials],
-    request: Request,
-) -> Optional[str]:
-    # 1) Standard (Swagger/HTTPBearer): credentials.credentials är redan "eyJ..."
+
+def _extract_token(request: Request, credentials: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
+    """
+    Stödjer:
+    - Swagger HTTPBearer (credentials.credentials)
+    - manuellt Authorization header
+    - råkar vara 'Bearer Bearer <token>'
+    - råkar klistra in 'Bearer <token>' i rutan
+    """
+    token = None
+
     if credentials and credentials.credentials:
         token = credentials.credentials.strip()
-    else:
-        token = ""
 
-    # 2) Fallback: ta från Authorization header (om credentials inte triggar)
     if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header:
-            parts = auth_header.strip().split()
-            # Viktigt: tar sista delen så "Bearer Bearer eyJ..." blir eyJ...
-            token = parts[-1] if parts else ""
+        auth = request.headers.get("Authorization", "").strip()
+        if auth:
+            # t.ex "Bearer xxx" eller "Bearer Bearer xxx"
+            parts = auth.split()
+            if len(parts) >= 2 and parts[0].lower() == "bearer":
+                token = " ".join(parts[1:]).strip()
 
-    # 3) Om någon råkat klistra in "Bearer eyJ..." som tokenvärde:
-    if token.lower().startswith("bearer "):
+    if not token:
+        return None
+
+    # Om token råkar börja med "Bearer " igen (pga Bearer Bearer)
+    while token.lower().startswith("bearer "):
         token = token.split(" ", 1)[1].strip()
 
-    return token or None
+    return token if token else None
 
 
 async def get_current_user(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
-    token = _extract_token_from_anywhere(credentials, request)
+    token = _extract_token(request, credentials)
+
     if not token:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
-    try:
-        payload = jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
-    except JWTError as e:
-        # Ger tydlig text (bra för debug)
-        raise HTTPException(status_code=401, detail=f"JWT decode failed: {e.__class__.__name__}")
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid token payload")
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="User not found")
 
     return user
 
@@ -125,7 +125,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     if not user:
         user = User(
-            id=str(uuid.uuid4()),
+            id=str(__import__("uuid").uuid4()),
             email=request.email,
             access_level=AccessLevel.FREE,
         )
@@ -151,20 +151,12 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
         user_id=user.id,
     )
 
-    return LoginResponse(token=token, user_id=user.id, email=user.email)
+    return LoginResponse(token=token, user_id=str(user.id), email=user.email)
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+async def me(current_user: User = Depends(get_current_user)):
     access_level = (
         current_user.access_level.value
         if hasattr(current_user.access_level, "value")
-        else str(current_user.access_level)
-    )
-
-    return UserResponse(
-        id=str(current_user.id),
-        email=current_user.email,
-        access_level=access_level,
-        created_at=current_user.created_at,
-        )
+        else str(current
