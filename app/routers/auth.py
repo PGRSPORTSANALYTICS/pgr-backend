@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request,
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
@@ -12,7 +13,7 @@ from app.services.audit import audit_service
 import uuid
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
+security = HTTPBearer ()
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -100,7 +101,15 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     return LoginResponse(token=token, user_id=user.id, email=user.email)
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends (security),
+                           db: AsyncSession = Depends(get_db),
+                          )-> User:
+                              token = credentials.credentials
+payload=jwt.code(
+    token, get_settings().jwt_secret,
+    algorithms=["HS256"],
+)
+user_id = 
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
