@@ -101,24 +101,28 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     return LoginResponse(token=token, user_id=user.id, email=user.email)
 
 
+from jose.exceptions import JWTError
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     token = credentials.credentials
 
-    # din befintliga jwt decode här
-    payload = jwt.decode(
-        token,
-        get_settings().jwt_secret,
-        algorithms=["HS256"],
-    )
+    try:
+        payload = jwt.decode(
+            token,
+            get_settings().jwt_secret,
+            algorithms=["HS256"],
+        )
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-    result = await db.execute(
-        select(User).where(User.id == user_id)
-    )
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
     if not user:
@@ -127,11 +131,18 @@ async def get_current_user(
     return user
 
 
+
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
+    access_level = (
+        current_user.access_level.value
+        if hasattr(current_user.access_level, "value")
+        else str(current_user.access_level)
+    )
+
     return UserResponse(
-        id=current_user.id,
+        id=str(current_user.id),
         email=current_user.email,
-        access_level=current_user.access_level.value,
+        access_level=access_level,
         created_at=current_user.created_at,
     )
