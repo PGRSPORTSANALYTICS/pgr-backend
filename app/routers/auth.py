@@ -1,24 +1,26 @@
-import uuid
-from datetime import datetime, timedelta
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt
-from jose.exceptions import JWTError
-from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from pydantic import BaseModel, EmailStr
+from jose import jwt
+from jose.exceptions import JWTError
+from datetime import datetime, timedelta
+from typing import Optional, Dict
+import uuid
 
-from app.config import get_settings
 from app.database import get_db
 from app.models.user import User, AccessLevel
+from app.config import get_settings
+from app.services.audit import audit_service
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Auto_error=False så vi kan ge egen 401 och även stödja raw header om swagger strular
 security = HTTPBearer(auto_error=False)
 
 
-# --------- Schemas ----------
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -36,85 +38,81 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
-# --------- JWT helpers ----------
-def _normalize_token(raw: str) -> str:
-    """
-    Gör oss tolerant mot:
-    - "Bearer <token>"
-    - "Bearer Bearer <token>" (vanligt om man klistrar in 'Bearer ' i Swagger)
-    - whitespace
-    """
-    if not raw:
-        return ""
-    token = raw.strip()
-
-    # Ta bort en eller flera "Bearer "
-    while token.lower().startswith("bearer "):
-        token = token.split(" ", 1)[1].strip()
-
-    return token
-
-
 def create_access_token(user_id: str, email: str) -> str:
     settings = get_settings()
     expire = datetime.utcnow() + timedelta(days=7)
-    payload = {
-        "sub": str(user_id),
+
+    to_encode = {
+        "sub": user_id,
         "email": email,
         "exp": expire,
     }
-    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+    return jwt.encode(to_encode, settings.jwt_secret, algorithm="HS256")
 
 
-def decode_token(token: str) -> Optional[dict]:
+def decode_token(token: str) -> Optional[Dict]:
     settings = get_settings()
     try:
         return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
-    except JWTError:
-        return None
     except Exception:
         return None
 
 
-# --------- Dependencies ----------
+def _extract_token_from_anywhere(
+    credentials: Optional[HTTPAuthorizationCredentials],
+    request: Request,
+) -> Optional[str]:
+    # 1) Standard (Swagger/HTTPBearer): credentials.credentials är redan "eyJ..."
+    if credentials and credentials.credentials:
+        token = credentials.credentials.strip()
+    else:
+        token = ""
+
+    # 2) Fallback: ta från Authorization header (om credentials inte triggar)
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header:
+            parts = auth_header.strip().split()
+            # Viktigt: tar sista delen så "Bearer Bearer eyJ..." blir eyJ...
+            token = parts[-1] if parts else ""
+
+    # 3) Om någon råkat klistra in "Bearer eyJ..." som tokenvärde:
+    if token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1].strip()
+
+    return token or None
+
+
 async def get_current_user(
     request: Request,
-    db: AsyncSession = Depends(get_db),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db),
 ) -> User:
-    # 1) Försök via HTTPBearer (Swagger/clients normalt)
-    raw = credentials.credentials if credentials else None
-
-    # 2) Fallback: läs header direkt (om någon klient skickar utan HTTPBearer)
-    if not raw:
-        auth_header = request.headers.get("Authorization")
-        if auth_header:
-            raw = auth_header
-
-    token = _normalize_token(raw or "")
+    token = _extract_token_from_anywhere(credentials, request)
     if not token:
-        raise HTTPException(status_code=401, detail="Missing authorization token")
+        raise HTTPException(status_code=401, detail="Missing authorization header")
 
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    try:
+        payload = jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
+    except JWTError as e:
+        # Ger tydlig text (bra för debug)
+        raise HTTPException(status_code=401, detail=f"JWT decode failed: {e.__class__.__name__}")
 
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    result = await db.execute(select(User).where(User.id == str(user_id)))
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     return user
 
 
-# --------- Routes ----------
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
-    # Hämta user om finns annars skapa
     result = await db.execute(select(User).where(User.email == request.email))
     user = result.scalar_one_or_none()
 
@@ -128,9 +126,25 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
         await db.commit()
         await db.refresh(user)
 
+        await audit_service.log(
+            db=db,
+            event_type="user_created",
+            source="auth",
+            status="success",
+            user_id=user.id,
+        )
+
     token = create_access_token(user.id, user.email)
 
-    return LoginResponse(token=token, user_id=str(user.id), email=user.email)
+    await audit_service.log(
+        db=db,
+        event_type="user_login",
+        source="auth",
+        status="success",
+        user_id=user.id,
+    )
+
+    return LoginResponse(token=token, user_id=user.id, email=user.email)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -146,4 +160,4 @@ async def get_me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         access_level=access_level,
         created_at=current_user.created_at,
-    )
+        )
