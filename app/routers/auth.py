@@ -1,11 +1,10 @@
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer
-from jose import jwt
-from jose.exceptions import JWTError
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,9 +15,10 @@ from app.models.user import User, AccessLevel
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-security = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
+# ---------- Schemas ----------
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -36,45 +36,52 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+# ---------- JWT helpers ----------
+def _clean_token(raw: str) -> str:
+    raw = (raw or "").strip()
+    # Om någon klistrar in "Bearer xxxxxx" även när vi bara vill ha token
+    if raw.lower().startswith("bearer "):
+        return raw.split(" ", 1)[1].strip()
+    return raw
+
+
 def create_access_token(user_id: str, email: str) -> str:
     settings = get_settings()
-    if not settings.jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT secret missing (JWT_SECRET or SESSION_SECRET).")
-
     expire = datetime.utcnow() + timedelta(days=7)
-    to_encode = {"sub": str(user_id), "email": email, "exp": expire}
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
-    return jwt.encode(to_encode, settings.jwt_secret, algorithm="HS256")
 
-
-def decode_token(token: str) -> Optional[dict]:
+def decode_token(token: str) -> Optional[Dict[str, Any]]:
     settings = get_settings()
-    if not settings.jwt_secret:
-        return None
     try:
+        token = _clean_token(token)
         return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except JWTError:
         return None
 
 
-async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    # Läser Authorization header manuellt (som du redan gör)
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header:
+# ---------- Auth dependency (för /me etc) ----------
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    # Om Swagger/klient inte skickar auth-header
+    if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
-    # Stöd både "Bearer <token>" och rå token (ifall Swagger strular)
-    token = auth_header.strip()
-    if token.lower().startswith("bearer "):
-        token = token.split(" ", 1)[1].strip()
-
+    token = _clean_token(credentials.credentials)
     payload = decode_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid token (missing sub)")
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -84,6 +91,7 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     return user
 
 
+# ---------- Routes ----------
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == request.email))
@@ -99,7 +107,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
         await db.commit()
         await db.refresh(user)
 
-    token = create_access_token(str(user.id), user.email)
+    token = create_access_token(user.id, user.email)
     return LoginResponse(token=token, user_id=str(user.id), email=user.email)
 
 
