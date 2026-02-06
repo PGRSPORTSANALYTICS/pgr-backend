@@ -1,6 +1,8 @@
 # app/routers/auth.py
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
+import hashlib
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -37,59 +39,63 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
-def create_access_token(user_id: str, email: str) -> str:
-    settings = get_settings()
+def _secret_fingerprint() -> str:
+    """
+    Visar inte secreten, bara en kort fingerprint så vi kan bevisa
+    att login och me använder samma key i logs.
+    """
+    secret = get_settings().jwt_secret.encode("utf-8")
+    return hashlib.sha256(secret).hexdigest()[:10]
 
+
+def create_access_token(user_id: str, email: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=7)
+
     payload = {
         "sub": str(user_id),
         "email": email,
-        # jose gillar säkrast unix timestamp (int)
         "exp": int(expire.timestamp()),
+        "iat": int(datetime.now(timezone.utc).timestamp()),
     }
 
-    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+    token = jwt.encode(payload, get_settings().jwt_secret, algorithm="HS256")
+    print("JWT SIGN fp=", _secret_fingerprint())
+    return token
 
 
 def decode_token(token: str) -> Optional[Dict]:
-    settings = get_settings()
     try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        print("JWT VERIFY fp=", _secret_fingerprint())
+        return jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
     except Exception as e:
-        # Loggar i Railway logs så vi kan se exakt fel
+        # Detta är guld i Railway Logs:
         print("JWT decode error:", repr(e))
         return None
 
 
 def _extract_token(request: Request, credentials: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
-    """
-    Stödjer:
-    - Swagger HTTPBearer (credentials.credentials)
-    - manuellt Authorization header
-    - råkar vara 'Bearer Bearer <token>'
-    - råkar klistra in 'Bearer <token>' i rutan
-    """
-    token = None
-
+    # 1) Swagger HTTPBearer
     if credentials and credentials.credentials:
-        token = credentials.credentials.strip()
+        t = credentials.credentials.strip()
+    else:
+        t = ""
 
-    if not token:
+    # 2) Header fallback
+    if not t:
         auth = request.headers.get("Authorization", "").strip()
         if auth:
-            # t.ex "Bearer xxx" eller "Bearer Bearer xxx"
             parts = auth.split()
             if len(parts) >= 2 and parts[0].lower() == "bearer":
-                token = " ".join(parts[1:]).strip()
+                t = " ".join(parts[1:]).strip()
 
-    if not token:
+    if not t:
         return None
 
-    # Om token råkar börja med "Bearer " igen (pga Bearer Bearer)
-    while token.lower().startswith("bearer "):
-        token = token.split(" ", 1)[1].strip()
+    # Extra safety: om någon råkat få "Bearer Bearer ..."
+    while t.lower().startswith("bearer "):
+        t = t.split(" ", 1)[1].strip()
 
-    return token if token else None
+    return t or None
 
 
 async def get_current_user(
@@ -98,7 +104,6 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
     token = _extract_token(request, credentials)
-
     if not token:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
@@ -125,7 +130,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     if not user:
         user = User(
-            id=str(__import__("uuid").uuid4()),
+            id=str(uuid.uuid4()),
             email=request.email,
             access_level=AccessLevel.FREE,
         )
@@ -161,10 +166,15 @@ async def me(current_user: User = Depends(get_current_user)):
         if hasattr(current_user.access_level, "value")
         else str(current_user.access_level)
     )
-
     return UserResponse(
         id=str(current_user.id),
         email=current_user.email,
         access_level=access_level,
         created_at=current_user.created_at,
     )
+
+
+# Valfri: snabb “är secreten laddad?”-endpoint (kan tas bort sen)
+@router.get("/_debug")
+async def debug():
+    return {"jwt_fp": _secret_fingerprint()}
