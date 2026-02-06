@@ -17,7 +17,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    lifespan=lifespan
+    lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 app.add_middleware(
