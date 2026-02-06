@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     
     database_url: str = os.getenv("DATABASE_URL", "")
     session_secret: str = os.getenv("SESSION_SECRET", "dev-secret-key")
+    jwt_secret: str = os.getenv("JWT_SECRET")
     
     host: str = "0.0.0.0"
     port: int = int(os.getenv("PORT", "5000"))
