@@ -100,7 +100,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     
     return LoginResponse(token=token, user_id=user.id, email=user.email)
 
-@router.get("/me", response_model=UserResponse)
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
