@@ -122,9 +122,8 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    return user
-        @router.get("/me", response_model=UserResponse)
-    async def get_me(current_user: User = Depends(get_current_user)):
+    @router.get("/me", response_model=UserResponse)
+async def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
