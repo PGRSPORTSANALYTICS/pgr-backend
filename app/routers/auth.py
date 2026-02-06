@@ -41,7 +41,11 @@ def create_access_token(user_id: str, email: str) -> str:
 def decode_token(token: str) -> Optional[dict]:
     settings = get_settings()
     try:
-        payload = jwt.decode(token, settings.session_secret, algorithms=["HS256"])
+      payload = jwt.decode(
+    token,
+    get_settings().session_secret,
+    algorithms=["HS256"],
+)  
         return payload
     except Exception:
         return None
