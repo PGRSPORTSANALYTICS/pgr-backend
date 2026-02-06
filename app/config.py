@@ -1,34 +1,32 @@
-import os
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Grund
     app_name: str = "PGR Backend"
     app_version: str = "1.0.0"
-    environment: str = os.getenv("ENVIRONMENT", "production")
-    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+    debug: bool = False
 
     # DB
-    database_url: str = os.getenv("DATABASE_URL", "")
-    sqlalchemy_database_url: str = os.getenv("SQLALCHEMY_DATABASE_URL", "")
+    database_url: str
 
-    # Secrets
-    session_secret: str = os.getenv("SESSION_SECRET", "")
+    # Auth (DETTA är nyckeln vi använder överallt)
+    jwt_secret: str
 
-    # ✅ JWT_SECRET är den vi använder för JWT
-    # fallback till SESSION_SECRET så allt inte dör om du råkat ha bara den
-    jwt_secret: str = os.getenv("JWT_SECRET") or os.getenv("SESSION_SECRET") or "dev-insecure-secret"
+    # Server
+    host: str = "0.0.0.0"
+    port: int = 5000
 
-    stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    # Pydantic Settings (läser env vars + ev .env lokalt)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
-    host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8000"))
 
-    class Config:
-        env_file = ".env"
-
-
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
