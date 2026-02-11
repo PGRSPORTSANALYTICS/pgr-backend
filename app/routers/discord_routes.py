@@ -1,7 +1,9 @@
 import os
 import httpx
+import requests
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from jose import jwt
 
@@ -37,7 +39,7 @@ def discord_connect(current_user: User = Depends(get_current_user)):
 @router.get("/callback")
 def discord_callback(
     code: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
