@@ -13,6 +13,15 @@ class Settings(BaseSettings):
 
     # Auth
     jwt_secret: str
+    jwt_algorithm: str = "HS256"   # <-- LÄGG TILL
+
+    # Discord
+    discord_client_id: str | None = None          # <-- LÄGG TILL
+    discord_client_secret: str | None = None      # <-- LÄGG TILL
+    discord_redirect_uri: str | None = None       # <-- LÄGG TILL
+
+    # Frontend (valfritt)
+    frontend_base_url: str | None = None          # <-- valfritt
 
     # Stripe
     stripe_secret_key: str = ""
