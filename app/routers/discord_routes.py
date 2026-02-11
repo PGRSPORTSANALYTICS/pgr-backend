@@ -1,8 +1,9 @@
 import os
-import requests
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
-from sqlalchemy.orm import Session
+
+from jose import jwt
 
 from app.database import get_db
 from app.routers.auth import get_current_user  # om du har denna
