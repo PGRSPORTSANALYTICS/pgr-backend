@@ -6,7 +6,7 @@ import uvicorn
 from app.config import get_settings
 from app.database import init_db
 from app.routers import health_router, auth_router, stripe_router, access_router
-
+from app.routers.discord_routes import router as discord_router
 settings = get_settings()
 
 @asynccontextmanager
