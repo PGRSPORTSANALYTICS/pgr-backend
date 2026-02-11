@@ -10,6 +10,7 @@ class Subscription(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     stripe_subscription_id = Column(String(255), unique=True, nullable=True)
     stripe_customer_id = Column(String(255), nullable=True)
+    discord_user_id = Column(String(32), nullable=True, index=True)
     plan = Column(String(100), nullable=True)
     status = Column(String(50), nullable=False, default="inactive")
     current_period_start = Column(DateTime(timezone=True), nullable=True)
