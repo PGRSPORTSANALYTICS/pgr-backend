@@ -29,11 +29,10 @@ def _build_discord_authorize_url(settings, state: str) -> str:
         "scope": "identify email",
         "state": state,
     }
-
     return f"{DISCORD_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-async def _exchange_code_for_access_token(code: str, settings):
+async def _exchange_code_for_access_token(code: str, settings) -> str:
     data = {
         "client_id": settings.discord_client_id,
         "client_secret": settings.discord_client_secret,
@@ -41,41 +40,32 @@ async def _exchange_code_for_access_token(code: str, settings):
         "code": code,
         "redirect_uri": settings.discord_redirect_uri,
     }
-
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(DISCORD_TOKEN_URL, data=data, headers=headers)
 
     if resp.status_code >= 400:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Token exchange failed: {resp.text}"
-        )
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {resp.text}")
 
     token_json = resp.json()
     access_token = token_json.get("access_token")
-
     if not access_token:
         raise HTTPException(status_code=400, detail="No access_token returned")
 
     return access_token
 
 
-async def _fetch_discord_user(access_token: str):
+async def _fetch_discord_user(access_token: str) -> dict:
     headers = {"Authorization": f"Bearer {access_token}"}
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(DISCORD_API_ME, headers=headers)
 
     if resp.status_code >= 400:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Discord /users/@me failed: {resp.text}"
-        )
+        raise HTTPException(status_code=400, detail=f"Discord /users/@me failed: {resp.text}")
 
     user_json = resp.json()
-
     if not user_json.get("id"):
         raise HTTPException(status_code=400, detail="Missing Discord user id")
 
@@ -91,15 +81,20 @@ async def discord_start(request: Request):
     settings = get_settings()
 
     if not settings.discord_client_id or not settings.discord_redirect_uri:
-        raise HTTPException(500, "Discord config missing")
+        raise HTTPException(status_code=500, detail="Discord config missing (client_id/redirect_uri)")
 
     state = secrets.token_urlsafe(32)
-
-    url = _build_discard_authorize_url(settings, state)
+    url = _build_discord_authorize_url(settings, state)  # ✅ FIX: rätt funktionsnamn
 
     response = RedirectResponse(url)
-    response.set_cookie("discord_state", state, httponly=True)
-
+    response.set_cookie(
+        "discord_state",
+        state,
+        httponly=True,
+        secure=True,       # rekommenderas i prod (https)
+        samesite="lax",
+        max_age=600,
+    )
     return response
 
 
@@ -118,48 +113,40 @@ async def discord_callback(
 
     cookie_state = request.cookies.get("discord_state")
     if not cookie_state or cookie_state != state:
-        raise HTTPException(401, "Invalid state")
+        raise HTTPException(status_code=401, detail="Invalid state")
 
     access_token = await _exchange_code_for_access_token(code, settings)
-
     discord_user = await _fetch_discord_user(access_token)
 
     discord_user_id = str(discord_user["id"])
     discord_email = discord_user.get("email")
 
+    # Om Discord inte lämnar email så kan du antingen:
+    # - kräva att användaren har verified email på Discord
+    # - eller fallback till "username@discord.local" (inte rekommenderat)
     if not discord_email:
-        raise HTTPException(
-            status_code=400,
-            detail="Discord did not return email"
-        )
+        raise HTTPException(status_code=400, detail="Discord did not return email (is it verified?)")
 
     # --------------------------
     # Hitta eller skapa user
     # --------------------------
-    result = await db.execute(
-        select(User).where(User.email == discord_email)
-    )
+    result = await db.execute(select(User).where(User.email == discord_email))
     user = result.scalar_one_or_none()
 
     if not user:
-        user = User(
-            email=discord_email,
-            access_level="free",
-        )
+        user = User(email=discord_email, access_level="free")
         db.add(user)
         await db.flush()
 
     user.discord_user_id = discord_user_id
     await db.commit()
 
-    # redirect till frontend om satt
+    # städa state-cookie
+    resp = None
     if settings.frontend_base_url:
-        return RedirectResponse(
-            f"{settings.frontend_base_url}/discord/linked?success=1"
-        )
+        resp = RedirectResponse(f"{settings.frontend_base_url}/discord/linked?success=1")
+    else:
+        resp = JSONResponse({"status": "ok", "email": discord_email, "discord_user_id": discord_user_id})
 
-    return JSONResponse({
-        "status": "ok",
-        "email": discord_email,
-        "discord_user_id": discord_user_id,
-    })
+    resp.delete_cookie("discord_state")
+    return resp
