@@ -263,9 +263,8 @@ async def discord_callback(
     await db.commit()
 
     # 5) Redirect till startsidan (A)
-    frontend_base = getattr(settings, "frontend_base_url", None) or "https://pgrsportsanalytics.com"
-    done_url = f"{frontend_base}/?discord=linked"
-    resp = RedirectResponse(done_url)
+    done_url = "https://pgrsportsanalytics.com/discord/linked?success=1"
+    resp = RedirectResponse(url=done_url)
 
     # städa state-cookie (om den fanns)
     resp.delete_cookie("discord_state")
