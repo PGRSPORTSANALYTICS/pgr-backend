@@ -29,11 +29,11 @@ DISCORD_API_ME = "https://discord.com/api/users/@me"
 
 def _build_discord_authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
     params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": settings.discord_client_id,
+        "redirect_uri": settings.discord_redirect_uri,
         "response_type": "code",
-        "scope": "identify",
-        "state": state,
+        "scope": "identify email",
+        "state": token,
         # "prompt": "consent",  # valfritt
     }
     return f"{DISCORD_AUTH_URL}?{urllib.parse.urlencode(params)}"
@@ -219,6 +219,10 @@ async def discord_callback(
 
     # 3) hämta discord user id
     discord_user_id = await _fetch_discord_user_id(access_token)
+
+    discord_user_id = discord_user.get("id")
+    discord_email = discord_user_get("email")
+    username = discord_user_get("username")
 
     # 4) Uppdatera DB
     #    A) Om vi har user_id_from_jwt => koppla discord_user_id till den användaren
