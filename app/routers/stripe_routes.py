@@ -118,13 +118,6 @@ async def stripe_webhook(request: Request):
             sig_header=sig_header,
             secret=STRIPE_WEBHOOK_SECRET,
         )
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=sig_header,
-            secret=STRIPE_WEBHOOK_SECRET,
-        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Webhook signature error: {str(e)}")
 
