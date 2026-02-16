@@ -1,31 +1,29 @@
+from __future__ import annotations
+
+import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from app.config import get_settings
 
-settings = get_settings()
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 def convert_database_url(url: str) -> str:
     parsed = urlparse(url)
-    
     new_scheme = "postgresql+asyncpg"
-    
     query_params = parse_qs(parsed.query)
     query_params.pop('sslmode', None)
-    
     new_query = urlencode(query_params, doseq=True)
-    
     new_parsed = parsed._replace(scheme=new_scheme, query=new_query)
     return urlunparse(new_parsed)
 
-database_url = convert_database_url(settings.database_url)
+database_url = convert_database_url(DATABASE_URL)
 
 engine = create_async_engine(
     database_url,
-    echo=settings.debug,
+    echo=False,
     pool_pre_ping=True,
     pool_recycle=300,
-    connect_args={"ssl": True} if "neon" in settings.database_url else {},
+    connect_args={"ssl": True} if "neon" in DATABASE_URL else {},
 )
 
 async_session_maker = async_sessionmaker(

@@ -9,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
 
+import os
 from app.database import get_db
 from app.models import User
 from app.config import get_settings
 from app.services.audit import audit_service
+
+JWT_SECRET = os.getenv("SESSION_SECRET", "dev-secret")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -52,7 +55,6 @@ def _looks_like_jwt(token: str) -> bool:
 
 
 def create_access_token(user_id: str, email: str) -> str:
-    settings = get_settings()
     expire = datetime.utcnow() + timedelta(days=7)
 
     to_encode = {
@@ -61,13 +63,12 @@ def create_access_token(user_id: str, email: str) -> str:
         "exp": expire,
     }
 
-    return jwt.encode(to_encode, settings.effective_jwt_secret, algorithm="HS256")
+    return jwt.encode(to_encode, JWT_SECRET, algorithm="HS256")
 
 
 def decode_token(token: str) -> Optional[Dict]:
-    settings = get_settings()
     try:
-        return jwt.decode(token, settings.effective_jwt_secret, algorithms=["HS256"])
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         return None
 

@@ -13,14 +13,14 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         db_status = "ok"
     except Exception:
         db_status = "error"
-    
+
     return {"status": "ok", "db": db_status}
 
 @router.get("/version")
 async def version():
     settings = get_settings()
     return {
-        "version": settings.app_version,
+        "version": "1.0.0",
         "environment": settings.environment,
-        "app_name": settings.app_name
+        "app_name": "PGR Backend"
     }
