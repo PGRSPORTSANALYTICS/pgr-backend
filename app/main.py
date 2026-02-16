@@ -6,8 +6,7 @@ import os
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import health_router, auth_router, stripe_router, access_router
-from app.routers.discord_routes import router as discord_router
+from app.routers import health_router, discord_router, stripe_router
 
 settings = get_settings()
 
@@ -32,10 +31,8 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
-app.include_router(auth_router)
-app.include_router(stripe_router)
-app.include_router(access_router)
 app.include_router(discord_router)
+app.include_router(stripe_router)
 
 @app.get("/")
 async def root():
