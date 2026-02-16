@@ -7,12 +7,20 @@ class Settings(BaseSettings):
     app_name: str = "PGR Backend"
     app_version: str = "1.0.0"
     debug: bool = False
+    environment: str = "development"
+    host: str = "0.0.0.0"
+    port: int = 5000
 
     # DB
     database_url: str
 
     # Auth
-    jwt_secret: str
+    jwt_secret: str = ""
+
+    @property
+    def effective_jwt_secret(self) -> str:
+        import os
+        return self.jwt_secret or os.getenv("SESSION_SECRET", "dev-secret")
 
     # Stripe
     stripe_secret_key: str = ""
