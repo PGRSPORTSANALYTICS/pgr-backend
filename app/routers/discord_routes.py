@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.routers.auth import get_current_user  # om du har denna
-from app.models.user import User  # justera om filnamnet skiljer
+from app.models import User
 
 router = APIRouter(prefix="/discord", tags=["discord"])
 

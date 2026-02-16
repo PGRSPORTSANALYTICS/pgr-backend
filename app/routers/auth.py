@@ -10,7 +10,7 @@ from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
 
 from app.database import get_db
-from app.models.user import User, AccessLevel
+from app.models import User
 from app.config import get_settings
 from app.services.audit import audit_service
 
@@ -144,7 +144,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
         user = User(
             id=str(__import__("uuid").uuid4()),
             email=request.email,
-            access_level=AccessLevel.FREE,
+            access_level="free",
         )
         db.add(user)
         await db.commit()
@@ -173,15 +173,9 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
-    access_level = (
-        current_user.access_level.value
-        if hasattr(current_user.access_level, "value")
-        else str(current_user.access_level)
-    )
-
     return UserResponse(
         id=str(current_user.id),
         email=current_user.email,
-        access_level=access_level,
+        access_level=current_user.access_level,
         created_at=current_user.created_at,
     )

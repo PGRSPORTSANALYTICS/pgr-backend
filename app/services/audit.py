@@ -1,59 +1,30 @@
 from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.audit_log import AuditLog
-from app.database import async_session_maker
-import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AuditService:
     @staticmethod
     async def log(
-        db: AsyncSession,
-        event_type: str,
-        source: str,
-        status: str,
+        db=None,
+        event_type: str = "",
+        source: str = "",
+        status: str = "",
         user_id: Optional[str] = None,
         request_id: Optional[str] = None,
         details: Optional[str] = None
-    ) -> AuditLog:
-        log_entry = AuditLog(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            event_type=event_type,
-            source=source,
-            status=status,
-            request_id=request_id,
-            details=details
-        )
-        db.add(log_entry)
-        await db.commit()
-        await db.refresh(log_entry)
-        return log_entry
-    
+    ):
+        logger.info(f"AUDIT | {event_type} | {source} | {status} | user={user_id} | {details or ''}")
+
     @staticmethod
     async def log_standalone(
-        event_type: str,
-        source: str,
-        status: str,
+        event_type: str = "",
+        source: str = "",
+        status: str = "",
         user_id: Optional[str] = None,
         request_id: Optional[str] = None,
         details: Optional[str] = None
-    ) -> Optional[AuditLog]:
-        try:
-            async with async_session_maker() as session:
-                log_entry = AuditLog(
-                    id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    event_type=event_type,
-                    source=source,
-                    status=status,
-                    request_id=request_id,
-                    details=details
-                )
-                session.add(log_entry)
-                await session.commit()
-                await session.refresh(log_entry)
-                return log_entry
-        except Exception:
-            return None
+    ):
+        logger.info(f"AUDIT | {event_type} | {source} | {status} | user={user_id} | {details or ''}")
 
 audit_service = AuditService()
