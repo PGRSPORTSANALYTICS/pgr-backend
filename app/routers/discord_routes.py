@@ -1,88 +1,136 @@
-import os
-import requests
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import RedirectResponse
-from sqlalchemy.orm import Session
+from __future__ import annotations
 
+import os
+import secrets
+import urllib.parse
+import httpx
+
+from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi.responses import RedirectResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
 from app.database import get_db
-from app.routers.auth import get_current_user  # om du har denna
 from app.models import User
 
 router = APIRouter(prefix="/discord", tags=["discord"])
 
-DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
-DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI")
-
-DISCORD_API_BASE = "https://discord.com/api"
+DISCORD_AUTH_URL = "https://discord.com/api/oauth2/authorize"
+DISCORD_TOKEN_URL = "https://discord.com/api/oauth2/token"
+DISCORD_ME_URL = "https://discord.com/api/users/@me"
 
 
-@router.get("/connect")
-def discord_connect(current_user: User = Depends(get_current_user)):
-    if not DISCORD_CLIENT_ID or not DISCORD_REDIRECT_URI:
-        raise HTTPException(status_code=500, detail="Discord env vars saknas")
+def _build_authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "identify email",
+        "state": state,
+        "prompt": "consent",
+    }
+    return DISCORD_AUTH_URL + "?" + urllib.parse.urlencode(params)
 
-    scope = "identify"
-    url = (
-        f"{DISCORD_API_BASE}/oauth2/authorize"
-        f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={DISCORD_REDIRECT_URI}"
-        f"&response_type=code"
-        f"&scope={scope}"
+
+async def _exchange_code_for_token(code: str, client_id: str, client_secret: str, redirect_uri: str) -> str:
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(DISCORD_TOKEN_URL, data=data, headers=headers)
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Discord token exchange failed: {r.text}")
+    return r.json()["access_token"]
+
+
+async def _fetch_discord_me(access_token: str) -> dict:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(DISCORD_ME_URL, headers=headers)
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Discord /me failed: {r.text}")
+    return r.json()
+
+
+@router.get("/start")
+async def discord_start(request: Request):
+    settings = get_settings()
+    if not (settings.discord_client_id and settings.discord_client_secret and settings.discord_redirect_uri):
+        raise HTTPException(status_code=500, detail="Discord env vars missing (CLIENT_ID/SECRET/REDIRECT_URI)")
+
+    state = secrets.token_urlsafe(24)
+    auth_url = _build_authorize_url(settings.discord_client_id, settings.discord_redirect_uri, state)
+
+    resp = RedirectResponse(url=auth_url, status_code=302)
+    resp.set_cookie(
+        key="discord_state",
+        value=state,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=10 * 60,
     )
-    return RedirectResponse(url)
+    return resp
 
 
 @router.get("/callback")
-def discord_callback(
+async def discord_callback(
+    request: Request,
     code: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    state: str,
+    db: AsyncSession = Depends(get_db),
 ):
-    if not (DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI):
-        raise HTTPException(status_code=500, detail="Discord env vars saknas")
+    settings = get_settings()
 
-    # 1) Byt code -> token
-    token_resp = requests.post(
-        f"{DISCORD_API_BASE}/oauth2/token",
-        data={
-            "client_id": DISCORD_CLIENT_ID,
-            "client_secret": DISCORD_CLIENT_SECRET,
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": DISCORD_REDIRECT_URI,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=20,
+    cookie_state = request.cookies.get("discord_state")
+    if not cookie_state or cookie_state != state:
+        raise HTTPException(status_code=401, detail="Invalid state")
+
+    if not (settings.discord_client_id and settings.discord_client_secret and settings.discord_redirect_uri):
+        raise HTTPException(status_code=500, detail="Discord env vars missing")
+
+    access_token = await _exchange_code_for_token(
+        code=code,
+        client_id=settings.discord_client_id,
+        client_secret=settings.discord_client_secret,
+        redirect_uri=settings.discord_redirect_uri,
     )
+    me = await _fetch_discord_me(access_token)
 
-    if token_resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {token_resp.text}")
+    discord_user_id = str(me.get("id") or "")
+    discord_email = me.get("email")
 
-    access_token = token_resp.json().get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=400, detail="No access_token from Discord")
+    if not discord_user_id:
+        raise HTTPException(status_code=400, detail="Discord user id missing")
+    if not discord_email:
+        raise HTTPException(status_code=400, detail="Discord email missing (ensure scope includes email)")
 
-    # 2) Hämta Discord user
-    me_resp = requests.get(
-        f"{DISCORD_API_BASE}/users/@me",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=20,
-    )
-
-    if me_resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Fetch /users/@me failed: {me_resp.text}")
-
-    discord_id = me_resp.json().get("id")
-    if not discord_id:
-        raise HTTPException(status_code=400, detail="No discord id returned")
-
-    # 3) Spara på user
-    user = db.query(User).filter(User.id == current_user.id).first()
+    result = await db.execute(select(User).where(User.email == discord_email))
+    user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        user = User(email=discord_email, access_level="free")
+        db.add(user)
 
-    user.discord_user_id = str(discord_id)
-    db.commit()
+    user.discord_user_id = discord_user_id
+    await db.commit()
 
-    return {"ok": True, "discord_user_id": user.discord_user_id}
+    done_url = f"{settings.frontend_base_url}/discord/linked?success=1"
+    resp = RedirectResponse(url=done_url, status_code=302)
+
+    resp.set_cookie(
+        key="pgr_discord_id",
+        value=discord_user_id,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+
+    resp.delete_cookie("discord_state")
+    return resp
