@@ -145,6 +145,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
     try:
         await _grant_discord_role(str(discord_id))
+    
     except Exception as e:
         print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
         return {"ok": True, "note": "Discord grant failed, check logs"}
