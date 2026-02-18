@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import User
+from app.models import User, AccessLevel
 
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
@@ -63,7 +63,7 @@ async def stripe_checkout(request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.discord_user_id == str(discord_id)))
     user = result.scalar_one_or_none()
     if not user:
-        user = User(email=f"{discord_id}@discord.local", discord_user_id=str(discord_id), access_level="free")
+        user = User(email=f"{discord_id}@discord.local", discord_user_id=str(discord_id), access_level="AccessLevel.free")
         db.add(user)
         await db.commit()
 
@@ -93,7 +93,7 @@ async def _set_user_premium(db: AsyncSession, discord_id: str, stripe_customer_i
     if not user:
         user = User(email=f"{discord_id}@discord.local", discord_user_id=str(discord_id), access_level="premium")
         db.add(user)
-    user.access_level = "premium"
+    user.access_level = "AccessLevel.premium"
     if stripe_customer_id:
         user.stripe_customer_id = stripe_customer_id
     await db.commit()
@@ -104,7 +104,7 @@ async def _set_user_free(db: AsyncSession, discord_id: str):
     user = result.scalar_one_or_none()
     if not user:
         return
-    user.access_level = "free"
+    user.access_level = "AccessLevel.free"
     await db.commit()
 
 
