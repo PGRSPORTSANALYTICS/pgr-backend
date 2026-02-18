@@ -127,9 +127,9 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Webhook signature error: {str(e)}")
 
     event_type = event["type"]
-    data = event["data"]["object"]
+data = event["data"]["object"]
 
-    if event_type == "checkout.session.completed":
+if event_type == "checkout.session.completed":
     discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
     stripe_customer_id = data.get("customer")
 
@@ -143,17 +143,19 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         return {"ok": True, "granted": True, "discord_id": str(discord_id)}
     except Exception as e:
         print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
-        return {"ok": True, "granted": False, "discord_id": str(discord_id), "note": "Discord grant failed, check logs"}
+        return {"ok": True, "granted": False, "discord_id": str(discord_id), "note": "Discord grant failed"}
 
 elif event_type == "customer.subscription.deleted":
     meta = data.get("metadata") or {}
     discord_id = meta.get("discord_id")
+
     if discord_id:
         await _set_user_free(db, str(discord_id))
         try:
             await _revoke_discord_role(str(discord_id))
         except Exception as e:
             print(f"[DISCORD_REVOKE_ERROR] discord_id={discord_id} err={e}")
+
     return {"ok": True}
 
 return {"ok": True}
