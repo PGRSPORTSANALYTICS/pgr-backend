@@ -130,22 +130,26 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     data = event["data"]["object"]
 
     if event_type == "checkout.session.completed":
-        discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
-        stripe_customer_id = data.get("customer")
+    discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
+    stripe_customer_id = data.get("customer")
 
-        if not discord_id:
-            return {"ok": True, "note": "No discord_id in checkout.session.completed"}
+    # ✅ Hämta email från Stripe checkout.session
+    stripe_email = None
+    customer_details = data.get("customer_details") or {}
+    stripe_email = customer_details.get("email") or data.get("customer_email")
 
-        await _set_user_premium(db, str(discord_id), stripe_customer_id)
+    if not discord_id:
+        return {"ok": True, "note": "No discord_id in checkout.session.completed"}
 
-        try:
-            await _grant_discord_role(str(discord_id))
-        except Exception as e:
-            print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
-            return {"ok": True, "note": "Discord grant failed, check logs"}
+    await set_user_premium(db, str(discord_id), stripe_customer_id, stripe_email)
 
-        return {"ok": True, "granted": True, "discord_id": str(discord_id)}
+    try:
+        await _grant_discord_role(str(discord_id))
+    except Exception as e:
+        print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
+        return {"ok": True, "note": "Discord grant failed, check logs"}
 
+    return {"ok": True, "granted": True, "discord_id": str(discord_id)}
     if event_type == "customer.subscription.deleted":
         meta = data.get("metadata") or {}
         discord_id = meta.get("discord_id")
