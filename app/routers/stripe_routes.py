@@ -67,7 +67,7 @@ async def stripe_checkout(request: Request, db: AsyncSession = Depends(get_db)):
         db.add(user)
         await db.commit()
 
-    success_url = f"{settings.frontend_success_url}/premium/success/"
+    success_url = f"{settings.frontend_success_url}"
     cancel_url = f"{settings.frontend_base_url}/cancel"
 
     try:
