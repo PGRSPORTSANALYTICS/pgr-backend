@@ -146,11 +146,6 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
     return {"ok": True, "granted": True, "discord_id": str(discord_id)}
     
-    except Exception as e:
-        print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
-        return {"ok": True, "note": "Discord grant failed, check logs"}
-
-    return {"ok": True, "granted": True, "discord_id": str(discord_id)}
     if event_type == "customer.subscription.deleted":
         meta = data.get("metadata") or {}
         discord_id = meta.get("discord_id")
