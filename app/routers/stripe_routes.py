@@ -127,10 +127,10 @@ async def create_checkout_session(request: Request):
     _require_settings(settings)
 
     stripe.api_key = settings.stripe_secret_key
-
-    payload = await request.json()
-    discord_id = payload.get("discord_id")
-    plan = payload.get("plan", "premium_399")
+    
+    discord_id = 
+    request.cookies.get("discord_id")
+    plan = "premium_399" 
 
     if not discord_id:
         raise HTTPException(status_code=400, detail="discord_id required")
@@ -140,7 +140,7 @@ async def create_checkout_session(request: Request):
         payment_method_types=["card"],
         line_items=[{"price": settings.stripe_price_id, "quantity": 1}],
         client_reference_id=str(discord_id),
-        success_url=f"{settings.frontend_url}/success=true",
+        success_url=f"{settings.frontend_success_url}?success=true",
         cancel_url=f"{settings.frontend_url}/cancel",
         metadata={
             "discord_id": str(discord_id),
