@@ -128,9 +128,9 @@ async def create_checkout_session(request: Request):
 
     stripe.api_key = settings.stripe_secret_key
     
-    discord_id = 
+     discord_id = 
         request.cookies.get("discord_id")
-    plan = "premium_399" 
+     plan = "premium_399" 
 
     if not discord_id:
         raise HTTPException(status_code=400, detail="discord_id required")
