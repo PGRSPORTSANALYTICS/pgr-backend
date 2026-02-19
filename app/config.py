@@ -7,7 +7,7 @@ from dataclasses import dataclass
 @dataclass
 class Settings:
     environment: str = os.getenv("ENVIRONMENT", "production")  # production/dev
-    frontend_base_url: str = os.getenv("FRONTEND_BASE_URL", "https://pgrsportsanalytics.com")
+    frontend_url: str = os.getenv("FRONTEND_URL", "https://pgrsportsanalytics.com")
     backend_base_url: str = os.getenv("BACKEND_BASE_URL", "https://pgr-backend-production.up.railway.app")
     frontend_success_url: str = os.getenv("FRONTEND_SUCCESS_URL", "https://pgrsportsanalytics.com/premium/access/")
 
