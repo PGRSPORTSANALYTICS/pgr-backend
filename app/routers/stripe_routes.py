@@ -127,7 +127,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Webhook signature error: {str(e)}")
 
     event_type = event["type"]
-data = event["data"]["object"]
+    data = event["data"]["object"]
 
 if event_type == "checkout.session.completed":
     discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
@@ -158,4 +158,3 @@ elif event_type == "customer.subscription.deleted":
 
     return {"ok": True}
 
-return {"ok": True}
