@@ -24,7 +24,7 @@ class Settings:
     # Stripe
     stripe_secret_key: str | None = os.getenv("STRIPE_SECRET_KEY")
     stripe_webhook_secret: str | None = os.getenv("STRIPE_WEBHOOK_SECRET")
-    stripe_price_399: str | None = os.getenv("STRIPE_PRICE_399")  # price_xxx
+    stripe_price_id: str | None = os.getenv("STRIPE_PRICE_ID")  # price_xxx
 
     # Cookie behavior
     cookie_secure: bool = os.getenv("COOKIE_SECURE", "true").lower() == "true"
