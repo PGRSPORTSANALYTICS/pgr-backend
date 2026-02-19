@@ -24,7 +24,7 @@ app = FastAPI(
 # Viktigt: allow_credentials=True för cookies (discord_id cookie)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_base_url],
+    allow_origins=[settings.frontend_url],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
