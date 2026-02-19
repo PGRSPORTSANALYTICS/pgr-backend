@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.config import get_config
+from app.config import get_settings
 
 # Anpassa imports till dina riktiga helpers
 from app.services.access import _set_user_premium, _set_user_free
