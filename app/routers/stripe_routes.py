@@ -13,28 +13,28 @@ from app.config import get_settings
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 
-async def _set_user_premium(db: AsyncSession, discord_id: str):
+async def _set_user_premium(db: AsyncSession, discord_user_id: str):
     await db.execute(
-        text("UPDATE users SET plan='premium', active=true WHERE discord_id=:id"),
-        {"id": discord_id},
+        text("UPDATE users SET access_level='premium', active=true WHERE discord_user_id=:id"),
+        {"id": discord_user_id},
     )
     await db.commit()
 
 
 async def _set_user_free(db: AsyncSession, discord_id: str):
     await db.execute(
-        text("UPDATE users SET plan='free', active=false WHERE discord_id=:id"),
-        {"id": discord_id},
+        text("UPDATE users SET access_level='free', active=false WHERE discord_user_id=:id"),
+        {"id": discord_user_id},
     )
     await db.commit()
 
 
-async def _grant_discord_role(discord_id: str):
+async def _grant_discord_role(discord_user_id: str):
     # TODO: koppla din riktiga Discord-grant här
     return True
 
 
-async def _revoke_discord_role(discord_id: str):
+async def _revoke_discord_role(discord_user_id: str):
     # TODO: koppla riktig revoke här
     return True
     
@@ -226,10 +226,10 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         if not discord_id:
             return {"ok": True, "note": "No discord_id in checkout"}
 
-        await _set_user_premium(db, str(discord_id))
+        await _set_user_premium(db, str(discord_user_id))
 
         try:
-            await _grant_discord_role(str(discord_id))
+            await _grant_discord_role(str(discord_user_id))
             return {"ok": True, "granted": True}
         except Exception as e:
             return {"ok": True, "granted": False, "error": str(e)}
@@ -239,25 +239,25 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     # --------------------------------------------------
     if event_type in ("invoice.paid", "invoice.payment_succeeded"):
         stripe_customer_id = obj.get("customer")
-        discord_id = _extract_discord_id(obj)
+        discord_user_id = _extract_discord_id(obj)
         subscription_id = obj.get("subscription")
         plan = None
 
-        if not discord_id and subscription_id:
+        if not discord_user_id and subscription_id:
             try:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                discord_id = _extract_discord_id(sub)
-                plan = _extract_plan(sub)
+                discord_user_id = _extract_discord_id(sub)
+                
             except Exception:
                 pass
 
-        if not discord_id:
-            return {"ok": True, "note": "Invoice paid but no discord_id"}
+        if not discord_user_id:
+            return {"ok": True, "note": "Invoice paid but no discord_user_id"}
 
-        await _set_user_premium(db, str(discord_id))
+        await _set_user_premium(db, str(discord_user_id))
 
         try:
-            await _grant_discord_role(str(discord_id))
+            await _grant_discord_role(str(discord_user_id))
         except Exception:
             pass
 
@@ -271,21 +271,21 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         stripe_customer_id = obj.get("customer")
         status = obj.get("status")
 
-        if not discord_id:
+        if not discord_user_id:
             return {"ok": True}
 
         if event_type == "customer.subscription.deleted" or status in ("canceled", "unpaid"):
-            await _set_user_free(db, str(discord_id))
+            await _set_user_free(db, str(discord_user_id))
             try:
-                await _revoke_discord_role(str(discord_id))
+                await _revoke_discord_role(str(discord_user_id))
             except Exception:
                 pass
             return {"ok": True, "revoked": True}
 
-        await _set_user_premium(db, str(discord_id), str(stripe_customer_id), plan=_extract_plan(obj) or "premium_399")
+        await _set_user_premium(db, str(discord_user_id), str(stripe_customer_id), access_level=_extract_plan(obj) or "premium_399")
 
         try:
-            await _grant_discord_role(str(discord_id))
+            await _grant_discord_role(str(discord_user_id))
         except Exception:
             pass
 
