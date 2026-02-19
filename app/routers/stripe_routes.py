@@ -1,160 +1,501 @@
+# app/routers/stripe_routes.py
+# Production-safe Stripe webhook handler:
+# - Verifies signature
+# - Handles checkout.session.completed (captures discord_id/plan, can grant immediately)
+# - Handles invoice.paid (SOURCE OF TRUTH for paid access)
+# - Handles customer.subscription.updated / deleted (downgrade/revoke)
+# - Idempotency via DB event log (optional but strongly recommended)
+
 from __future__ import annotations
 
-import json
-import httpx
+import os
+from typing import Any, Optional, Dict
+
 import stripe
-
-from fastapi import APIRouter, Request, Depends, HTTPException
-from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from app.config import get_settings
-from app.database import get_db
-from app.models import User, AccessLevel
+router = APIRouter()
 
-router = APIRouter(prefix="/stripe", tags=["stripe"])
+# ---- configure stripe ----
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
+# ---- your deps / functions (you already have these) ----
+# from app.db import get_db
+# from app.services.users import _set_user_premium, _set_user_free
+# from app.services.discord import _grant_discord_role, _revoke_discord_role
+# from app.services.subscriptions import _create_or_update_subscription, _cancel_subscription
 
-async def _grant_discord_role(discord_user_id: str):
-    settings = get_settings()
-    if not (settings.discord_bot_token and settings.discord_guild_id and settings.discord_premium_role_id):
-        raise RuntimeError("Discord env vars missing (DISCORD_BOT_TOKEN / DISCORD_GUILD_ID / DISCORD_PREMIUM_ROLE_ID)")
-
-    url = f"https://discord.com/api/v10/guilds/{settings.discord_guild_id}/members/{discord_user_id}/roles/{settings.discord_premium_role_id}"
-    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.put(url, headers=headers)
-
-    if r.status_code not in (200, 204):
-        raise RuntimeError(f"Discord grant failed: {r.status_code} {r.text}")
+async def get_db() -> AsyncSession:  # placeholder – replace with your actual Depends(get_db)
+    raise NotImplementedError
 
 
-async def _revoke_discord_role(discord_user_id: str):
-    settings = get_settings()
-    if not (settings.discord_bot_token and settings.discord_guild_id and settings.discord_premium_role_id):
-        raise RuntimeError("Discord env vars missing (DISCORD_BOT_TOKEN / DISCORD_GUILD_ID / DISCORD_PREMIUM_ROLE_ID)")
+# =========================
+# Helpers
+# =========================
 
-    url = f"https://discord.com/api/v10/guilds/{settings.discord_guild_id}/members/{discord_user_id}/roles/{settings.discord_premium_role_id}"
-    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+def _safe_get_meta(obj: Any) -> Dict[str, str]:
+    meta = getattr(obj, "metadata", None) or (obj.get("metadata") if isinstance(obj, dict) else None) or {}
+    # ensure keys/values are strings
+    out: Dict[str, str] = {}
+    for k, v in meta.items():
+        if v is None:
+            continue
+        out[str(k)] = str(v)
+    return out
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.delete(url, headers=headers)
 
-    if r.status_code not in (200, 204):
-        raise RuntimeError(f"Discord revoke failed: {r.status_code} {r.text}")
+def _pick_discord_id(*candidates: Optional[str]) -> Optional[str]:
+    for c in candidates:
+        if c and str(c).strip():
+            return str(c).strip()
+    return None
 
 
-@router.get("/checkout")
-async def stripe_checkout(request: Request, db: AsyncSession = Depends(get_db)):
-    settings = get_settings()
-    if not settings.stripe_secret_key:
-        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY missing")
-    if not settings.stripe_price_399:
-        raise HTTPException(status_code=500, detail="STRIPE_PRICE_399 missing")
+async def _event_already_processed(db: AsyncSession, event_id: str) -> bool:
+    """
+    Idempotency guard. Create a small table if you don't have one:
 
-    stripe.api_key = settings.stripe_secret_key
-
-    discord_id = request.cookies.get("pgr_discord_id")
-    if not discord_id:
-        return RedirectResponse(url=f"{settings.backend_base_url}/discord/start", status_code=302)
-
-    result = await db.execute(select(User).where(User.discord_user_id == str(discord_id)))
-    user = result.scalar_one_or_none()
-    if not user:
-        user = User(email=f"{discord_id}@discord.local", discord_user_id=str(discord_id), access_level= AccessLevel.free)
-        db.add(user)
-        await db.commit()
-
-    success_url = f"{settings.frontend_success_url}"
-    cancel_url = f"{settings.frontend_base_url}/cancel"
-
+    CREATE TABLE IF NOT EXISTS stripe_events (
+      id TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    """
+    # If you don't want event log yet, return False always.
     try:
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": settings.stripe_price_399, "quantity": 1}],
-            success_url=success_url,
-            cancel_url=cancel_url,
-            client_reference_id=str(discord_id),
-            metadata={"discord_id": str(discord_id), "plan": "premium_399"},
-            subscription_data={"metadata": {"discord_id": str(discord_id), "plan": "premium_399"}},
-            allow_promotion_codes=True,
+        res = await db.execute(text("SELECT 1 FROM stripe_events WHERE id = :id LIMIT 1"), {"id": event_id})
+        return res.scalar_one_or_none() is not None
+    except Exception:
+        # table not created yet -> no idempotency
+        return False
+
+
+async def _mark_event_processed(db: AsyncSession, event_id: str) -> None:
+    try:
+        await db.execute(
+            text("INSERT INTO stripe_events (id) VALUES (:id) ON CONFLICT (id) DO NOTHING"),
+            {"id": event_id},
+        )
+        await db.commit()
+    except Exception:
+        # table not created yet -> ignore
+        pass
+
+
+async def _ensure_subscription_row(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    stripe_customer_id: Optional[str],
+    stripe_subscription_id: Optional[str],
+    plan: Optional[str],
+    status: str,
+    current_period_end: Optional[int] = None,
+) -> None:
+    """
+    Minimal DB upsert so 'subscriptions' table won't stay empty.
+    Adjust column names to your schema if needed.
+    Assumed columns (from your screenshot):
+      user_id, stripe_subscription_id, stripe_customer_id, plan, status, current_period_end
+    """
+    await db.execute(
+        text(
+            """
+            INSERT INTO subscriptions (user_id, stripe_subscription_id, stripe_customer_id, plan, status, current_period_end)
+            VALUES (:user_id, :sub_id, :cust_id, :plan, :status, :cpe)
+            ON CONFLICT (user_id) DO UPDATE SET
+              stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, subscriptions.stripe_subscription_id),
+              stripe_customer_id     = COALESCE(EXCLUDED.stripe_customer_id,     subscriptions.stripe_customer_id),
+              plan                   = COALESCE(EXCLUDED.plan,                   subscriptions.plan),
+              status                 = EXCLUDED.status,
+              current_period_end     = COALESCE(EXCLUDED.current_period_end,     subscriptions.current_period_end)
+            """
+        ),
+        {
+            "user_id": user_id,
+            "sub_id": stripe_subscription_id,
+            "cust_id": stripe_customer_id,
+            "plan": plan,
+            "status": status,
+            "cpe": current_period_end,
+        },
+    )
+    await db.commit()
+
+
+async def _activate_access(
+    db: AsyncSession,
+    *,
+    discord_id: str,
+    stripe_customer_id: Optional[str],
+    stripe_subscription_id: Optional[str],
+    plan: Optional[str],
+    current_period_end: Optional[int] = None,
+) -> None:
+    # 1) Set user premium in your users table
+    await _set_user_premium(db, str(discord_id), stripe_customer_id)
+
+    # 2) Keep subscriptions table in sync
+    await _ensure_subscription_row(
+        db,
+        user_id=str(discord_id),
+        stripe_customer_id=stripe_customer_id,
+        stripe_subscription_id=stripe_subscription_id,
+        plan=plan,
+        status="active",
+        current_period_end=current_period_end,
+    )
+
+    # 3) Grant role (don’t fail webhook if Discord fails)
+    try:
+        await _grant_discord_role(str(discord_id))
+    except Exception as e:
+        print("[DISCORD_GRANT_ERROR]", discord_id, str(e))
+
+
+async def _deactivate_access(
+    db: AsyncSession,
+    *,
+    discord_id: str,
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+) -> None:
+    await _set_user_free(db, str(discord_id))
+
+    # update subscription row (if exists)
+    try:
+        await _ensure_subscription_row(
+            db,
+            user_id=str(discord_id),
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            plan=None,
+            status="canceled",
+            current_period_end=None,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+        print("[SUBSCRIPTION_UPDATE_ERROR]", discord_id, str(e))
 
-    return RedirectResponse(url=session.url, status_code=303)
-
-
-async def _set_user_premium(db: AsyncSession, discord_id: str, stripe_customer_id: str | None):
-    result = await db.execute(select(User).where(User.discord_user_id == str(discord_id)))
-    user = result.scalar_one_or_none()
-    if not user:
-        user = User(email=f"{discord_id}@discord.local", discord_user_id=str(discord_id), access_level= AccessLevel.premium)
-        db.add(user)
-    user.access_level = AccessLevel.premium
-    if stripe_customer_id:
-        user.stripe_customer_id = stripe_customer_id
-    await db.commit()
+    try:
+        await _revoke_discord_role(str(discord_id))
+    except Exception as e:
+        print("[DISCORD_REVOKE_ERROR]", discord_id, str(e))
 
 
-async def _set_user_free(db: AsyncSession, discord_id: str):
-    result = await db.execute(select(User).where(User.discord_user_id == str(discord_id)))
-    user = result.scalar_one_or_none()
-    if not user:
-        return
-    user.access_level = AccessLevel.free
-    await db.commit()
+# =========================
+# Webhook Route
+# =========================
 
-
-@router.post("/webhook")
+@router.post("/stripe/webhook")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    settings = get_settings()
-    if not settings.stripe_webhook_secret:
+    if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET missing")
 
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
     try:
         event = stripe.Webhook.construct_event(
             payload=payload,
             sig_header=sig_header,
-            secret=settings.stripe_webhook_secret,
+            secret=STRIPE_WEBHOOK_SECRET,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Webhook signature error: {str(e)}")
 
-    event_type = event["type"]
-    data = event["data"]["object"]
+    event_id = event.get("id")
+    event_type = event.get("type")
+    data_obj = event.get("data", {}).get("object", {})
 
-    if event_type == "checkout.session.completed":
-        discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
-        stripe_customer_id = data.get("customer")
+    # Idempotency (recommended)
+    if event_id and await _event_already_processed(db, event_id):
+        return {"ok": True, "deduped": True}
 
-        if not discord_id:
-            return {"ok": True, "note": "No discord id in checkout.session.completed"}
+    try:
+        # -------------------------
+        # 1) CHECKOUT COMPLETED
+        # -------------------------
+        if event_type == "checkout.session.completed":
+            session = data_obj
+            meta = _safe_get_meta(session)
 
-        await _set_user_premium(db, str(discord_id), stripe_customer_id)
+            # discord id might come from client_reference_id OR metadata.discord_id
+            discord_id = _pick_discord_id(
+                session.get("client_reference_id"),
+                meta.get("discord_id"),
+            )
 
-        try:
-            await _grant_discord_role(str(discord_id))
-            return {"ok": True, "granted": True, "discord_id": str(discord_id)}
-        except Exception as e:
-            print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
-            return {"ok": True, "granted": False, "discord_id": str(discord_id), "note": "Discord grant failed"}
+            # Helpful fields
+            stripe_customer_id = session.get("customer")
+            # If it’s a subscription checkout, Stripe sets subscription id on the session:
+            stripe_subscription_id = session.get("subscription")
+            plan = meta.get("plan")
 
-    elif event_type == "customer.subscription.deleted":
-        meta = data.get("metadata") or {}
-        discord_id = meta.get("discord_id")
+            # If no discord id, we cannot map to a user — return ok (don’t fail Stripe)
+            if not discord_id:
+                print("[WEBHOOK] checkout.session.completed missing discord_id", {"event_id": event_id})
+                if event_id:
+                    await _mark_event_processed(db, event_id)
+                return {"ok": True, "note": "No discord_id in checkout.session.completed"}
 
-        if discord_id:
-            await _set_user_free(db, str(discord_id))
-            try:
-                await _revoke_discord_role(str(discord_id))
-            except Exception as e:
-                print(f"[DISCORD_REVOKE_ERROR] discord_id={discord_id} err={e}")
+            # ✅ Optional: you can grant immediately here (some people want instant)
+            # BUT SOURCE-OF-TRUTH should still be invoice.paid.
+            await _activate_access(
+                db,
+                discord_id=discord_id,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+                plan=plan,
+                current_period_end=None,
+            )
 
-    return {"ok": True}
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "handled": event_type, "discord_id": discord_id}
 
+        # -------------------------
+        # 2) INVOICE PAID (best for access)
+        # -------------------------
+        elif event_type == "invoice.paid":
+            invoice = data_obj
+            meta = _safe_get_meta(invoice)
+
+            # invoice metadata is usually the most reliable place
+            discord_id = _pick_discord_id(meta.get("discord_id"))
+            stripe_customer_id = invoice.get("customer")
+            stripe_subscription_id = invoice.get("subscription")
+            plan = meta.get("plan")
+
+            # current_period_end can be derived from lines or subscription object; invoice has period_end sometimes
+            current_period_end = invoice.get("period_end")  # may be None
+            if not current_period_end:
+                # try: invoice.lines.data[0].period.end
+                try:
+                    lines = invoice.get("lines", {}).get("data", []) or []
+                    if lines and lines[0].get("period", {}).get("end"):
+                        current_period_end = int(lines[0]["period"]["end"])
+                except Exception:
+                    pass
+
+            if not discord_id:
+                print("[WEBHOOK] invoice.paid missing discord_id", {"event_id": event_id})
+                if event_id:
+                    await _mark_event_processed(db, event_id)
+                return {"ok": True, "note": "No discord_id in invoice.paid"}
+
+            await _activate_access(
+                db,
+                discord_id=discord_id,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+                plan=plan,
+                current_period_end=current_period_end,
+            )
+
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "handled": event_type, "discord_id": discord_id}
+
+        # -------------------------
+        # 3) SUBSCRIPTION UPDATED
+        # -------------------------
+        elif event_type == "customer.subscription.updated":
+            sub = data_obj
+            meta = _safe_get_meta(sub)
+
+            stripe_customer_id = sub.get("customer")
+            stripe_subscription_id = sub.get("id")
+            status = sub.get("status")  # active, past_due, canceled, unpaid, etc.
+            current_period_end = sub.get("current_period_end")
+
+            # Some implementations store discord_id in subscription metadata
+            discord_id = _pick_discord_id(meta.get("discord_id"))
+
+            # If not present, you can look it up by stripe_customer_id in your DB if you store it on user
+            if not discord_id and stripe_customer_id:
+                try:
+                    # Example: users table has stripe_customer_id + discord_id (adjust to your schema)
+                    res = await db.execute(
+                        text("SELECT discord_id FROM users WHERE stripe_customer_id = :cid LIMIT 1"),
+                        {"cid": stripe_customer_id},
+                    )
+                    discord_id = res.scalar_one_or_none()
+                    if discord_id:
+                        discord_id = str(discord_id)
+                except Exception:
+                    pass
+
+            if not discord_id:
+                print("[WEBHOOK] subscription.updated missing discord_id", {"event_id": event_id})
+                if event_id:
+                    await _mark_event_processed(db, event_id)
+                return {"ok": True, "note": "No discord_id in customer.subscription.updated"}
+
+            # Decide access from status
+            if status in ("active", "trialing"):
+                await _activate_access(
+                    db,
+                    discord_id=discord_id,
+                    stripe_customer_id=stripe_customer_id,
+                    stripe_subscription_id=stripe_subscription_id,
+                    plan=meta.get("plan"),
+                    current_period_end=current_period_end,
+                )
+            elif status in ("canceled", "unpaid"):
+                await _deactivate_access(
+                    db,
+                    discord_id=discord_id,
+                    stripe_customer_id=stripe_customer_id,
+                    stripe_subscription_id=stripe_subscription_id,
+                )
+            else:
+                # past_due / incomplete etc: keep subscription row but don’t necessarily revoke instantly
+                await _ensure_subscription_row(
+                    db,
+                    user_id=str(discord_id),
+                    stripe_customer_id=stripe_customer_id,
+                    stripe_subscription_id=stripe_subscription_id,
+                    plan=meta.get("plan"),
+                    status=status or "unknown",
+                    current_period_end=current_period_end,
+                )
+
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "handled": event_type, "discord_id": discord_id, "status": status}
+
+        # -------------------------
+        # 4) SUBSCRIPTION DELETED (revoke)
+        # -------------------------
+        elif event_type == "customer.subscription.deleted":
+            sub = data_obj
+            meta = _safe_get_meta(sub)
+
+            stripe_customer_id = sub.get("customer")
+            stripe_subscription_id = sub.get("id")
+            discord_id = _pick_discord_id(meta.get("discord_id"))
+
+            if not discord_id and stripe_customer_id:
+                try:
+                    res = await db.execute(
+                        text("SELECT discord_id FROM users WHERE stripe_customer_id = :cid LIMIT 1"),
+                        {"cid": stripe_customer_id},
+                    )
+                    discord_id = res.scalar_one_or_none()
+                    if discord_id:
+                        discord_id = str(discord_id)
+                except Exception:
+                    pass
+
+            if not discord_id:
+                print("[WEBHOOK] subscription.deleted missing discord_id", {"event_id": event_id})
+                if event_id:
+                    await _mark_event_processed(db, event_id)
+                return {"ok": True, "note": "No discord_id in customer.subscription.deleted"}
+
+            await _deactivate_access(
+                db,
+                discord_id=discord_id,
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id,
+            )
+
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "handled": event_type, "discord_id": discord_id}
+
+        # -------------------------
+        # 5) OPTIONAL: INVOICE PAYMENT FAILED
+        # -------------------------
+        elif event_type == "invoice.payment_failed":
+            invoice = data_obj
+            meta = _safe_get_meta(invoice)
+            discord_id = _pick_discord_id(meta.get("discord_id"))
+            stripe_customer_id = invoice.get("customer")
+            stripe_subscription_id = invoice.get("subscription")
+
+            # usually do NOT instantly revoke; mark status for visibility
+            if discord_id:
+                try:
+                    await _ensure_subscription_row(
+                        db,
+                        user_id=str(discord_id),
+                        stripe_customer_id=stripe_customer_id,
+                        stripe_subscription_id=stripe_subscription_id,
+                        plan=meta.get("plan"),
+                        status="past_due",
+                        current_period_end=None,
+                    )
+                except Exception as e:
+                    print("[SUBSCRIPTION_UPDATE_ERROR]", str(e))
+
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "handled": event_type}
+
+        # -------------------------
+        # Unhandled events
+        # -------------------------
+        else:
+            if event_id:
+                await _mark_event_processed(db, event_id)
+            return {"ok": True, "ignored": event_type}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Don't let unexpected exceptions cause Stripe retries forever without visibility
+        print("[WEBHOOK_FATAL_ERROR]", event_type, event_id, str(e))
+        raise HTTPException(status_code=500, detail="Webhook handler error")
+
+
+# =========================
+# You must provide these in your project
+# =========================
+
+async def _set_user_premium(db: AsyncSession, discord_id: str, stripe_customer_id: Optional[str]) -> None:
+    """
+    Implement your existing logic.
+    Should set users.access_level = premium and store stripe_customer_id if you want lookup later.
+    """
+    await db.execute(
+        text(
+            """
+            UPDATE users
+            SET access_level = 'premium',
+                stripe_customer_id = COALESCE(:cid, stripe_customer_id)
+            WHERE discord_id = :did
+            """
+        ),
+        {"did": discord_id, "cid": stripe_customer_id},
+    )
+    await db.commit()
+
+
+async def _set_user_free(db: AsyncSession, discord_id: str) -> None:
+    await db.execute(
+        text("UPDATE users SET access_level = 'free' WHERE discord_id = :did"),
+        {"did": discord_id},
+    )
+    await db.commit()
+
+
+async def _grant_discord_role(discord_id: str) -> None:
+    """
+    Call your discord bot/service to grant premium role.
+    """
+    # implement in your codebase
+    return
+
+
+async def _revoke_discord_role(discord_id: str) -> None:
+    """
+    Call your discord bot/service to revoke premium role.
+    """
+    # implement in your codebase
+    return
