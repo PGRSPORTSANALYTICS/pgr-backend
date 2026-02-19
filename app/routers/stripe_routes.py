@@ -10,13 +10,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.config import get_settings
 
-# Anpassa imports till dina riktiga helpers
-from app.services.access import _set_user_premium, _set_user_free
-from app.services.discord import _grant_discord_role, _revoke_discord_role
-
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 
+async def _set_user_premium(db: AsyncSession, discord_id: str):
+    await db.execute(
+        text("UPDATE users SET plan='premium', active=true WHERE discord_id=:id"),
+        {"id": discord_id},
+    )
+    await db.commit()
+
+
+async def _set_user_free(db: AsyncSession, discord_id: str):
+    await db.execute(
+        text("UPDATE users SET plan='free', active=false WHERE discord_id=:id"),
+        {"id": discord_id},
+    )
+    await db.commit()
+
+
+async def _grant_discord_role(discord_id: str):
+    # TODO: koppla din riktiga Discord-grant här
+    return True
+
+
+async def _revoke_discord_role(discord_id: str):
+    # TODO: koppla riktig revoke här
+    return True
+    
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
