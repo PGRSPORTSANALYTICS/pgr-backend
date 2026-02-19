@@ -121,16 +121,16 @@ async def checkout_get(request: Request):
     )
 
     return RedirectResponse(session.url, status_code=303)
+
 @router.post("/checkout")
 async def create_checkout_session(request: Request):
     settings = get_settings()
     _require_settings(settings)
 
     stripe.api_key = settings.stripe_secret_key
-    
-     discord_id = 
-        request.cookies.get("discord_id")
-     plan = "premium_399" 
+
+    discord_id = request.cookies.get("discord_id")
+    plan = "premium_399"
 
     if not discord_id:
         raise HTTPException(status_code=400, detail="discord_id required")
@@ -140,23 +140,14 @@ async def create_checkout_session(request: Request):
         payment_method_types=["card"],
         line_items=[{"price": settings.stripe_price_id, "quantity": 1}],
         client_reference_id=str(discord_id),
-        success_url=f"{settings.frontend_success_url}?success=true",
+        success_url=f"{settings.frontend_url}/success=true",
         cancel_url=f"{settings.frontend_url}/cancel",
-        metadata={
-            "discord_id": str(discord_id),
-            "plan": str(plan),
-        },
-        subscription_data={
-            "metadata": {
-                "discord_id": str(discord_id),
-                "plan": str(plan),
-            }
-        },
+        metadata={"discord_id": str(discord_id), "plan": str(plan)},
+        subscription_data={"metadata": {"discord_id": str(discord_id), "plan": str(plan)}},
         allow_promotion_codes=True,
     )
 
     return {"checkout_url": session.url}
-
 
 # --------------------------------------------------
 # Customer Portal
