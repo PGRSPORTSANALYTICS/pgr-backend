@@ -254,7 +254,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         if not discord_id:
             return {"ok": True, "note": "Invoice paid but no discord_id"}
 
-        await _set_user_premium(db, str(discord_id)
+        await _set_user_premium(db, str(discord_id))
 
         try:
             await _grant_discord_role(str(discord_id))
