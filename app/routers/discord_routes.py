@@ -120,7 +120,7 @@ async def discord_callback(
     user.discord_user_id = discord_user_id
     await db.commit()
 
-    done_url = f"{settings.frontend_base_url}/discord/linked?success=1"
+    done_url = f"{settings.frontend_url}/discord/linked?success=1"
     resp = RedirectResponse(url=done_url, status_code=302)
 
     resp.set_cookie(
