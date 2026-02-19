@@ -129,32 +129,32 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     event_type = event["type"]
     data = event["data"]["object"]
 
-if event_type == "checkout.session.completed":
-    discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
-    stripe_customer_id = data.get("customer")
+    if event_type == "checkout.session.completed":
+        discord_id = data.get("client_reference_id") or (data.get("metadata") or {}).get("discord_id")
+        stripe_customer_id = data.get("customer")
 
-    if not discord_id:
-        return {"ok": True, "note": "No discord_id in checkout.session.completed"}
+        if not discord_id:
+            return {"ok": True, "note": "No discord id in checkout.session.completed"}
 
-    await _set_user_premium(db, str(discord_id), stripe_customer_id)
+        await _set_user_premium(db, str(discord_id), stripe_customer_id)
 
-    try:
-        await _grant_discord_role(str(discord_id))
-        return {"ok": True, "granted": True, "discord_id": str(discord_id)}
-    except Exception as e:
-        print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
-        return {"ok": True, "granted": False, "discord_id": str(discord_id), "note": "Discord grant failed"}
-
-elif event_type == "customer.subscription.deleted":
-    meta = data.get("metadata") or {}
-    discord_id = meta.get("discord_id")
-
-    if discord_id:
-        await _set_user_free(db, str(discord_id))
         try:
-            await _revoke_discord_role(str(discord_id))
+            await _grant_discord_role(str(discord_id))
+            return {"ok": True, "granted": True, "discord_id": str(discord_id)}
         except Exception as e:
-            print(f"[DISCORD_REVOKE_ERROR] discord_id={discord_id} err={e}")
+            print(f"[DISCORD_GRANT_ERROR] discord_id={discord_id} err={e}")
+            return {"ok": True, "granted": False, "discord_id": str(discord_id), "note": "Discord grant failed"}
+
+    elif event_type == "customer.subscription.deleted":
+        meta = data.get("metadata") or {}
+        discord_id = meta.get("discord_id")
+
+        if discord_id:
+            await _set_user_free(db, str(discord_id))
+            try:
+                await _revoke_discord_role(str(discord_id))
+            except Exception as e:
+                print(f"[DISCORD_REVOKE_ERROR] discord_id={discord_id} err={e}")
 
     return {"ok": True}
 
