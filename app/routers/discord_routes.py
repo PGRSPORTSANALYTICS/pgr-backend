@@ -124,7 +124,7 @@ async def discord_callback(
     resp = RedirectResponse(url=done_url, status_code=302)
 
     resp.set_cookie(
-        key="pgr_discord_id",
+        key="discord_id",
         value=discord_user_id,
         httponly=True,
         secure=settings.cookie_secure,
