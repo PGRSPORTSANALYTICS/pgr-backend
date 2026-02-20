@@ -15,7 +15,7 @@ router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 async def _set_user_premium(db: AsyncSession, discord_user_id: str):
     await db.execute(
-        text("UPDATE users SET access_level='premium', active=true WHERE discord_user_id=:id"),
+        text("UPDATE users SET access_level='premium' WHERE discord_user_id=:id"),
         {"id": discord_user_id},
     )
     await db.commit()
@@ -23,7 +23,7 @@ async def _set_user_premium(db: AsyncSession, discord_user_id: str):
 
 async def _set_user_free(db: AsyncSession, discord_id: str):
     await db.execute(
-        text("UPDATE users SET access_level='free', active=false WHERE discord_user_id=:id"),
+        text("UPDATE users SET access_level='free' WHERE discord_user_id=:id"),
         {"id": discord_user_id},
     )
     await db.commit()
