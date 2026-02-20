@@ -142,7 +142,7 @@ async def create_checkout_session(request: Request):
         payment_method_types=["card"],
         line_items=[{"price": settings.stripe_price_id, "quantity": 1}],
         client_reference_id=str(discord_id),
-        success_url=f"{settings.frontend_url}/success",
+        success_url=f"{settings.frontend_url}/premium/access",
         cancel_url=f"{settings.frontend_url}/cancel",
         metadata={
             "discord_id": str(discord_id),
