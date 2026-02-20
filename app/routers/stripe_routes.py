@@ -227,10 +227,10 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         if not discord_id:
             return {"ok": True, "note": "No discord_id in checkout"}
 
-        await _set_user_premium(db, str(discord_user_id))
+        await _set_user_premium(db, str(discord_id))
 
         try:
-            await _grant_discord_role(str(discord_user_id))
+            await _grant_discord_role(str(discord_id))
             return {"ok": True, "granted": True}
         except Exception as e:
             return {"ok": True, "granted": False, "error": str(e)}
