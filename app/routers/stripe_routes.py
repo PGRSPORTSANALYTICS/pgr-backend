@@ -29,8 +29,29 @@ async def _set_user_free(db: AsyncSession, discord_id: str):
     await db.commit()
 
 
+import os
+import httpx
+
 async def _grant_discord_role(discord_user_id: str):
-    # TODO: koppla din riktiga Discord-grant här
+    bot_token = os.getenv("DISCORD_BOT_TOKEN")
+    guild_id = os.getenv("DISCORD_GUILD_ID")
+    role_id = os.getenv("DISCORD_PREMIUM_ROLE_ID")
+
+    if not bot_token or not guild_id or not role_id:
+        raise Exception("Missing Discord env vars")
+
+    url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{discord_user_id}/roles/{role_id}"
+
+    headers = {
+        "Authorization": f"Bot {bot_token}"
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.put(url, headers=headers)
+
+    if r.status_code not in (200, 204):
+        raise Exception(f"Discord role grant failed: {r.status_code} {r.text}")
+
     return True
 
 
