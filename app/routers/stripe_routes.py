@@ -63,7 +63,7 @@ async def _idempotency_check(db: AsyncSession, event_id: str) -> bool:
         return False
     except Exception as e:
         print(WEBHOOK SIGNATURE ERROR:", repr(e))
-        raise HTTPException(status_code=400, detail=f"Webhook signature error:{str(e)}")
+           raise HTTPException(status_code=400, detail=f"Webhook signature error:{str(e)}")
         await db.rollback()
         return True
 
